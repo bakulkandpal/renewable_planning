@@ -1,2 +1,2 @@
 # renewable_planning
-Renewable asset optimization for local energy communities
+Algorithms for renewable asset optimization and planning in local energy communities
