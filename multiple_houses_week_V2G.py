@@ -10,9 +10,12 @@ pv_kw_cost=560  # In Euro. Per kW cost of PV.
 wind_kw_cost=360  # In Euro. Per kW cost of wind installation.
 EV_Charger_Capacity=7  # Single EV charging power in kW
 preferred_start_hours = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
+EV_battery_capacity = 60 # A single EV battery capacity in kWh
+Initial_SOC = 0.6  # Initial state of charge of battery of Each EV.
 
 
 penalty_obj_flex=1  # Lagrangian penalty to satisfy flexible demand constraint.
+eta = 1 # Efficiency EV charging/discharging
 df_solar = pd.read_csv('ninja_pv_spain.csv')
 df_price=pd.read_csv('Day-ahead Prices_Spain.csv')
 df_price.index = pd.date_range(start='2023-01-01', periods=len(df_price), freq='H')
@@ -104,7 +107,10 @@ model.ev_energy=ConstraintList()
 model.ev_power_bound=ConstraintList()
 model.flex_demand_constraints = ConstraintList()
 model.binary_restrictions = ConstraintList()
-eta = 0.95 # Efficiency
+
+model.SOC = Var(model.ev_num, model.T, bounds=(0.2, 1.0)) 
+model.SOC_evolution = ConstraintList()
+
 
 def objective_rule(model):
     Objective_pv = pv_kw_cost * model.pv_capacity
@@ -134,10 +140,21 @@ for ev in model.ev_num:
 ### Big M constraint for EV charging/discharging
 for ev in model.ev_num:
     for i in model.T:
-        model.ev_power_bound.add(model.Pchar[ev, i] <= 1000 * model.charging_status[ev, i])  
-        model.ev_power_bound.add(model.Pdichar[ev, i] <= 1000 * (1 - model.charging_status[ev, i]))
-       
+        model.ev_power_bound.add(model.Pchar[ev, i] <= 5000 * model.charging_status[ev, i])  
+        model.ev_power_bound.add(model.Pdichar[ev, i] <= 5000 * (1 - model.charging_status[ev, i]))
 
+#### Constraint for SOC between bounds        
+for ev in model.ev_num:
+    for i in model.T:
+        if i == model.T.first():
+            model.SOC_evolution.add(model.SOC[ev, i] == Initial_SOC)
+        else:
+            charging_energy = model.Pchar[ev, i-1] * eta * 0.25
+            discharging_energy = model.Pdichar[ev, i-1] * 0.25 / eta 
+            SOC_change = (charging_energy - discharging_energy) / EV_battery_capacity * factor
+            model.SOC_evolution.add(model.SOC[ev, i] == model.SOC[ev, i-1] + SOC_change)        
+
+        
 #### Demand Generation Matching
 for t in range(672):   
         model.power_balance.add(model.pv_capacity * pv_profile_15min[t] + model.wind_capacity * wind_profile_15min[t] + 
@@ -182,9 +199,12 @@ for day in range(1, 8):
 data = {i: {} for i in model.T}
 for ev in model.ev_num:
     for i in model.T:
-        Pchar_value = value(model.Pchar[ev, i])       
-        data[i][f'EV{ev}'] = Pchar_value
+        Pchar_value = value(model.Pchar[ev, i])  
+        Pdichar_value = value(model.Pdichar[ev, i])  
+        data[i][f'EV{ev}_Pchar'] = Pchar_value  
+        data[i][f'EV{ev}_Pdichar'] = Pdichar_value
 Pchar_df = pd.DataFrame.from_dict(data, orient='index')
+
 
 
 Objective_spot_value = sum(value(spot_price_15min[i]) * value(model.grid_energy[i]) for i in model.T)*52*20
@@ -196,11 +216,10 @@ labels = ['Spot Price', 'Wind', 'PV']
 total_objective_value = Objective_spot_value + Objective_wind_value + Objective_PV_value
 print("Total Objective Value:", total_objective_value)
 
-charge_EV0 = Pchar_df['EV0'][Pchar_df['EV0'] >= 0]
-discharge_EV0 = Pchar_df['EV0'][Pchar_df['EV0'] < 0]
-charge_EV1 = Pchar_df['EV1'][Pchar_df['EV1'] >= 0]
-discharge_EV1 = Pchar_df['EV1'][Pchar_df['EV1'] < 0]
-
+charge_EV0 = Pchar_df['EV0_Pchar']
+discharge_EV0 = Pchar_df['EV0_Pdichar']
+charge_EV1 = Pchar_df['EV1_Pchar']
+discharge_EV1 = Pchar_df['EV1_Pdichar']
 
 
 plt.plot(filled_values_per_day, label='Flex Optimization', marker='o')
@@ -229,16 +248,14 @@ plt.ylabel('Power (kW)')
 plt.legend()
 plt.show()
 
-
-plt.figure(figsize=(12, 6))
-plt.plot(Pchar_df['EV0'], label='All EV0', marker='o', color='royalblue')
-plt.plot(Pchar_df['EV1'], label='All EV1', linestyle='--', marker='x', color='darkorange')
-plt.xlabel('Interval (15 min)', fontsize=14)
-plt.ylabel('Charging (kW)', fontsize=14)
-plt.legend(fontsize=12)
-plt.xticks(fontsize=12)
-plt.yticks(fontsize=12)
+plt.figure(figsize=(8,6))
+plt.plot(wind_week_data, label='Wind per 1kW')
+plt.plot(pv_profile_15min, label='PV per 1kW')
+plt.xlabel('Interval (15 min)')
+plt.ylabel('Power (kW)')
+plt.legend()
 plt.show()
+
 
 
 fig, axs = plt.subplots(2, 2, figsize=(14, 10)) 
@@ -261,14 +278,6 @@ axs[1, 1].set_ylabel('Power (kW)')
 plt.tight_layout()
 plt.show()
 
-
-plt.figure(figsize=(8,6))
-plt.plot(wind_week_data, label='Wind per 1kW')
-plt.plot(pv_profile_15min, label='PV per 1kW')
-plt.xlabel('Interval (15 min)')
-plt.ylabel('Power (kW)')
-plt.legend()
-plt.show()
 
 
 plt.figure(figsize=(8, 6))
